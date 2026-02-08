@@ -1,0 +1,542 @@
+import os
+import threading
+import queue
+import re
+from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+# Required Libraries
+import pandas as pd
+try:
+    from pypdf import PdfReader, PdfWriter
+except ImportError:
+    from PyPDF2 import PdfReader, PdfWriter
+
+
+class ModernPDFExtractorApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("PDF Splitter & Renamer Pro")
+        self.root.geometry("1000x800")
+        self.root.resizable(True, True)
+        
+        # Theme variables
+        self.dark_mode = tk.BooleanVar(value=False)
+        self.ui_queue = queue.Queue()
+        
+        # Variables
+        self.folder_var = tk.StringVar()
+        self.file_var = tk.StringVar()
+        self.save_same_folder_var = tk.BooleanVar(value=False)
+        self.processing = False
+        
+        # Stats
+        self.total_pages = 0
+        self.processed_pages = 0
+        
+        # Setup theme
+        self._setup_themes()
+        self._build_ui()
+        
+        # Bind events
+        self.folder_var.trace_add("write", lambda *_: self.update_button_states())
+        self.file_var.trace_add("write", lambda *_: self.update_button_states())
+        
+        self.update_button_states()
+        self.apply_theme()
+        self.root.after(100, self.process_ui_queue)
+        
+        # Center window
+        self.center_window()
+
+    def _setup_themes(self):
+        """Define color schemes for light and dark modes"""
+        self.themes = {
+            'light': {
+                'bg': '#f5f5f5',
+                'fg': '#212121',
+                'card_bg': '#ffffff',
+                'accent': '#FF5722',
+                'accent_hover': '#E64A19',
+                'secondary': '#2196F3',
+                'success': '#4CAF50',
+                'border': '#e0e0e0',
+                'text_bg': '#ffffff',
+                'disabled': '#9e9e9e'
+            },
+            'dark': {
+                'bg': '#1e1e1e',
+                'fg': '#e0e0e0',
+                'card_bg': '#2d2d2d',
+                'accent': '#FF6B4A',
+                'accent_hover': '#FF5722',
+                'secondary': '#42A5F5',
+                'success': '#66BB6A',
+                'border': '#404040',
+                'text_bg': '#252525',
+                'disabled': '#666666'
+            }
+        }
+
+    def get_theme(self):
+        """Get current theme colors"""
+        return self.themes['dark' if self.dark_mode.get() else 'light']
+
+    def apply_theme(self):
+        """Apply the selected theme to all widgets"""
+        theme = self.get_theme()
+        
+        self.root.configure(bg=theme['bg'])
+        
+        # Update all frames
+        for widget in self.root.winfo_children():
+            self._apply_theme_recursive(widget, theme)
+        
+        # Update progress bar style
+        style = ttk.Style()
+        style.theme_use('default')
+        style.configure(
+            "Custom.Horizontal.TProgressbar",
+            troughcolor=theme['border'],
+            bordercolor=theme['border'],
+            background=theme['accent'],
+            lightcolor=theme['accent'],
+            darkcolor=theme['accent']
+        )
+
+    def _apply_theme_recursive(self, widget, theme):
+        """Recursively apply theme to widget and children"""
+        widget_type = widget.winfo_class()
+        
+        try:
+            if widget_type in ['Frame', 'Labelframe']:
+                widget.configure(bg=theme['card_bg'] if widget_type == 'Labelframe' else theme['bg'])
+                if widget_type == 'Labelframe':
+                    widget.configure(fg=theme['fg'], borderwidth=1, relief='solid')
+            elif widget_type == 'Label':
+                if widget == self.title_label:
+                    widget.configure(bg=theme['bg'], fg=theme['accent'])
+                elif widget == self.stats_label:
+                    widget.configure(bg=theme['bg'], fg=theme['secondary'])
+                else:
+                    widget.configure(bg=theme.get('card_bg', theme['bg']), fg=theme['fg'])
+            elif widget_type == 'Entry':
+                widget.configure(
+                    bg=theme['text_bg'],
+                    fg=theme['fg'],
+                    insertbackground=theme['fg'],
+                    relief='solid',
+                    borderwidth=1
+                )
+            elif widget_type == 'Button':
+                # Special handling for different button types
+                if hasattr(self, 'btn_split') and widget == self.btn_split:
+                    widget.configure(
+                        bg=theme['accent'],
+                        fg='white',
+                        activebackground=theme['accent_hover'],
+                        relief='flat',
+                        borderwidth=0
+                    )
+                else:
+                    widget.configure(
+                        bg=theme['card_bg'],
+                        fg=theme['fg'],
+                        activebackground=theme['border'],
+                        relief='solid',
+                        borderwidth=1
+                    )
+            elif widget_type == 'Checkbutton':
+                widget.configure(
+                    bg=theme['bg'],
+                    fg=theme['fg'],
+                    activebackground=theme['bg'],
+                    selectcolor=theme['card_bg']
+                )
+        except tk.TclError:
+            pass
+        
+        # Recurse to children
+        for child in widget.winfo_children():
+            self._apply_theme_recursive(child, theme)
+
+    def center_window(self):
+        """Center the window on screen"""
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def _build_ui(self):
+        """Build the enhanced user interface"""
+        
+        # Header with title and theme toggle
+        header_frame = tk.Frame(self.root)
+        header_frame.pack(fill='x', padx=20, pady=(15, 5))
+        
+        self.title_label = tk.Label(
+            header_frame,
+            text="📄 PDF Document Splitter Pro",
+            font=("Segoe UI", 20, "bold")
+        )
+        self.title_label.pack(side='left')
+        
+        # Theme toggle
+        theme_frame = tk.Frame(header_frame)
+        theme_frame.pack(side='right')
+        
+        tk.Label(theme_frame, text="🌙 Dark Mode", font=("Segoe UI", 10)).pack(side='left', padx=(0, 5))
+        theme_check = tk.Checkbutton(
+            theme_frame,
+            variable=self.dark_mode,
+            command=self.apply_theme
+        )
+        theme_check.pack(side='left')
+        
+        # Stats display
+        self.stats_label = tk.Label(
+            self.root,
+            text="Ready to process documents",
+            font=("Segoe UI", 10),
+            anchor='w'
+        )
+        self.stats_label.pack(fill='x', padx=20, pady=(0, 10))
+        
+        # --- 1. Master PDF Input ---
+        frame_input = tk.LabelFrame(
+            self.root,
+            text="Select Master PDF File  ",
+            font=("Segoe UI", 11, "bold"),
+            padx=15,
+            pady=15
+        )
+        frame_input.pack(pady=10, padx=20, fill="x")
+        
+        input_container = tk.Frame(frame_input)
+        input_container.pack(fill='x')
+        
+        self.entry_file = tk.Entry(
+            input_container,
+            textvariable=self.file_var,
+            font=("Segoe UI", 10)
+        )
+        self.entry_file.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=5)
+        
+        btn_browse_file = tk.Button(
+            input_container,
+            text="📁 Browse PDF",
+            command=self.browse_file,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+            padx=20,
+            pady=5
+        )
+        btn_browse_file.pack(side="right")
+        
+        # File info label
+        self.file_info_label = tk.Label(
+            frame_input,
+            text="No file selected",
+            font=("Segoe UI", 9),
+            anchor='w'
+        )
+        self.file_info_label.pack(fill='x', pady=(5, 0))
+
+        # --- 2. Output Folder ---
+        frame_output = tk.LabelFrame(
+            self.root,
+            text="Choose Output Folder  ",
+            font=("Segoe UI", 11, "bold"),
+            padx=15,
+            pady=15
+        )
+        frame_output.pack(pady=10, padx=20, fill="x")
+        
+        output_container = tk.Frame(frame_output)
+        output_container.pack(fill='x')
+        
+        self.entry_folder = tk.Entry(
+            output_container,
+            textvariable=self.folder_var,
+            font=("Segoe UI", 10)
+        )
+        self.entry_folder.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=5)
+        
+        self.btn_browse_folder = tk.Button(
+            output_container,
+            text="📂 Browse Folder",
+            command=self.browse_folder,
+            font=("Segoe UI", 10),
+            cursor="hand2",
+            padx=20,
+            pady=5
+        )
+        self.btn_browse_folder.pack(side="right")
+        
+        # Folder info label
+        self.folder_info_label = tk.Label(
+            frame_output,
+            text="No folder selected",
+            font=("Segoe UI", 9),
+            anchor='w'
+        )
+        self.folder_info_label.pack(fill='x', pady=(5, 0))
+
+        self.same_folder_check = tk.Checkbutton(
+            frame_output,
+            text="Save split files in the same folder as selected PDF",
+            variable=self.save_same_folder_var,
+            command=self.toggle_output_mode,
+            font=("Segoe UI", 9),
+            anchor='w'
+        )
+        self.same_folder_check.pack(fill='x', pady=(8, 0))
+
+        # --- 3. Progress Bar ---
+        progress_frame = tk.Frame(self.root)
+        progress_frame.pack(pady=10, padx=20, fill='x')
+        
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.progress_var,
+            maximum=100,
+            mode='determinate',
+            style="Custom.Horizontal.TProgressbar"
+        )
+        self.progress_bar.pack(fill='x', ipady=5)
+        
+        self.progress_label = tk.Label(
+            progress_frame,
+            text="0%",
+            font=("Segoe UI", 9)
+        )
+        self.progress_label.pack(pady=(5, 0))
+
+        # --- 4. Actions ---
+        frame_actions = tk.Frame(self.root)
+        frame_actions.pack(pady=15)
+
+        self.btn_split = tk.Button(
+            frame_actions,
+            text="✂️  SPLIT & RENAME DOCUMENTS",
+            command=self.start_split_thread,
+            font=("Segoe UI", 12, "bold"),
+            cursor="hand2",
+            width=30,
+            height=2
+        )
+        self.btn_split.pack(side="left", padx=10)
+
+    # --- UI Helpers ---
+    def post_ui(self, fn, *args, **kwargs):
+        """Queue UI updates for thread-safe execution"""
+        self.ui_queue.put((fn, args, kwargs))
+
+    def process_ui_queue(self):
+        """Process queued UI updates"""
+        while True:
+            try:
+                fn, args, kwargs = self.ui_queue.get_nowait()
+                fn(*args, **kwargs)
+            except queue.Empty:
+                break
+        self.root.after(100, self.process_ui_queue)
+
+    def toggle_output_mode(self):
+        """Switch between manual output folder and source-PDF folder mode."""
+        self.update_button_states()
+
+    def browse_file(self):
+        """Browse for PDF file"""
+        f = filedialog.askopenfilename(
+            title="Select PDF File",
+            filetypes=[("PDF Files", "*.pdf"), ("All Files", "*.*")]
+        )
+        if f:
+            self.file_var.set(f)
+            # Show file info
+            file_path = Path(f)
+            size_mb = file_path.stat().st_size / (1024 * 1024)
+            self.file_info_label.config(
+                text=f"📄 {file_path.name} ({size_mb:.2f} MB)"
+            )
+            self.update_button_states()
+
+    def browse_folder(self):
+        """Browse for output folder"""
+        d = filedialog.askdirectory(title="Select Output Folder")
+        if d:
+            self.folder_var.set(d)
+            self.folder_info_label.config(text=f"📁 {Path(d).name}")
+            self.update_button_states()
+
+    def update_button_states(self):
+        """Enable/disable buttons based on input state"""
+        has_file = bool(self.file_var.get())
+        use_source_folder = self.save_same_folder_var.get()
+        has_folder = bool(self.folder_var.get())
+
+        self.entry_folder.config(state="disabled" if use_source_folder else "normal")
+        browse_state = "disabled" if use_source_folder else "normal"
+        if hasattr(self, "btn_browse_folder"):
+            self.btn_browse_folder.config(state=browse_state)
+
+        if use_source_folder:
+            if has_file:
+                source_path = Path(self.file_var.get()).parent
+                self.folder_info_label.config(text=f"📁 Source folder: {source_path}")
+            else:
+                self.folder_info_label.config(text="Source folder will be used after selecting a PDF")
+        elif not has_folder:
+            self.folder_info_label.config(text="No folder selected")
+        
+        if self.processing:
+            self.btn_split.config(state="disabled")
+        else:
+            can_process = has_file and (use_source_folder or has_folder)
+            self.btn_split.config(state="normal" if can_process else "disabled")
+
+    def update_progress(self, current, total):
+        """Update progress bar"""
+        if total > 0:
+            percent = (current / total) * 100
+            self.progress_var.set(percent)
+            self.progress_label.config(text=f"{percent:.0f}% ({current}/{total})")
+            self.stats_label.config(
+                text=f"Processing: {current} of {total} pages completed"
+            )
+
+    # --- CORE LOGIC: Regex Extraction ---
+    def extract_details(self, text, page_num):
+        """
+        Extracts Document No and Ack Date using Regex.
+        Enhanced with better pattern matching.
+        """
+        # Some PDF pages may not contain extractable text.
+        if not text:
+            text = ""
+
+        details = {
+            "doc_no": f"Unknown_{page_num}",
+            "ack_date": "Unknown_Date"
+        }
+        
+        # 1. SEARCH FOR DOCUMENT NO (Enhanced patterns)
+        patterns_doc = [
+            r"Document\s*No\.?[:\s]*([A-Za-z0-9-/]+)",
+            r"Doc\s*No\.?[:\s]*([A-Za-z0-9-/]+)",
+            r"Reference\s*No\.?[:\s]*([A-Za-z0-9-/]+)",
+            r"No\.?[:\s]*([A-Za-z0-9-/]+)"
+        ]
+        
+        for pattern in patterns_doc:
+            doc_match = re.search(pattern, text, re.IGNORECASE)
+            if doc_match:
+                details["doc_no"] = doc_match.group(1).strip()
+                break
+
+        # 2. SEARCH FOR ACK DATE (Enhanced patterns)
+        patterns_date = [
+            r"Ack\s*Date[:\s]*(\d{2}[-./]\d{2}[-./]\d{4})",
+            r"Acknowledgement\s*Date[:\s]*(\d{2}[-./]\d{2}[-./]\d{4})",
+            r"Date[:\s]*(\d{2}[-./]\d{2}[-./]\d{4})",
+        ]
+        
+        for pattern in patterns_date:
+            date_match = re.search(pattern, text, re.IGNORECASE)
+            if date_match:
+                raw_date = date_match.group(1)
+                details["ack_date"] = raw_date.replace("/", "-").replace(".", "-")
+                break
+
+        return details
+
+    # --- LOGIC: Splitting Thread ---
+    def start_split_thread(self):
+        """Start processing in a separate thread"""
+        if not self.processing:
+            self.processing = True
+            self.update_button_states()
+            threading.Thread(target=self.run_split, daemon=True).start()
+
+    def run_split(self):
+        """Main processing logic"""
+        master_path = Path(self.file_var.get())
+        if self.save_same_folder_var.get():
+            output_folder = master_path.parent
+        else:
+            output_folder = Path(self.folder_var.get())
+
+        try:
+            reader = PdfReader(master_path)
+            total_pages = len(reader.pages)
+            self.total_pages = total_pages
+            self.post_ui(self.stats_label.config, text=f"Processing {total_pages} pages...")
+
+            success_count = 0
+            error_count = 0
+
+            for i, page in enumerate(reader.pages):
+                try:
+                    # Extract text
+                    text = page.extract_text() or ""
+                    
+                    # Get details
+                    details = self.extract_details(text, i + 1)
+                    
+                    # Clean filename strings
+                    safe_doc = re.sub(r'[\\/*?:"<>|]', "", details['doc_no'])
+                    safe_date = re.sub(r'[\\/*?:"<>|]', "", details['ack_date'])
+
+                    # Create filename
+                    new_filename = f"{safe_doc} _ {safe_date}.pdf"
+                    save_path = output_folder / new_filename
+
+                    # Handle duplicates
+                    counter = 1
+                    while save_path.exists():
+                        new_filename = f"{safe_doc} _ {safe_date} ({counter}).pdf"
+                        save_path = output_folder / new_filename
+                        counter += 1
+
+                    # Save page
+                    writer = PdfWriter()
+                    writer.add_page(page)
+                    with open(save_path, "wb") as f_out:
+                        writer.write(f_out)
+
+                    success_count += 1
+                    
+                except Exception as e:
+                    error_count += 1
+                
+                # Update progress
+                self.post_ui(self.update_progress, i + 1, total_pages)
+
+            self.post_ui(
+                messagebox.showinfo,
+                "Success",
+                f"✅ Successfully split {success_count} files.\n"
+                f"⚠️ Errors: {error_count}\n"
+                f"📁 Saved to: {output_folder}"
+            )
+            
+            self.post_ui(self.stats_label.config, text=f"✅ Completed: {success_count} files processed successfully")
+
+        except Exception as e:
+            self.post_ui(messagebox.showerror, "Error", f"An error occurred:\n\n{str(e)}")
+            self.post_ui(self.stats_label.config, text="❌ Error occurred during processing")
+        
+        finally:
+            self.processing = False
+            self.post_ui(self.update_button_states)
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ModernPDFExtractorApp(root)
+    root.mainloop()
